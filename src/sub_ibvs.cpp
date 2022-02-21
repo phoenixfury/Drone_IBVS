@@ -244,17 +244,17 @@ class IBVS {        // The class
     }
 
 
-    bool drone_takeOff(float h)
+    bool drone_takeOff(float x, float y, float h)
     {
         geometry_msgs::PoseStamped pose;
 
-        pose.pose.position.x = 0;
-        pose.pose.position.y = 0;
+        pose.pose.position.x = x;
+        pose.pose.position.y = y;
         pose.pose.position.z = h;
 
         if (!takeoff_time_init)
         {
-            for(int i = 100; ros::ok() && i > 0; --i)
+            for(int i = 100; ros::alpha, alpha_d, ok() && i > 0; --i)
             {
                 delta = ros::Time::now().toSec() - begin;
                 if (!takeoff_time_init  || delta > 0.02)
@@ -342,13 +342,13 @@ class IBVS {        // The class
     }
 
 
-    std::tuple<double, double, arma::mat, arma::mat,
+    std::tuple<arma::mat, arma::mat,
                 double, double, double>compute_jacobian(arma::mat center_moments_d
                           ,arma::mat center_moments, double x_g, double y_g, double xd_g, double yd_g)
     {
         int m_00;
         float z_d, a_d, a_c, a_n, x_n, y_n;
-        double alpha_d, alpha;
+
 
         arma::mat J_moments =  -1 * arma::diagmat (arma::ones<arma::vec>(4));
         arma::mat J_moments_d =  -1 * arma::diagmat (arma::ones<arma::vec>(4));
@@ -376,15 +376,6 @@ class IBVS {        // The class
         float xd_n = a_n * xd_g;
         float yd_n = a_n * yd_g;
 
-        // alpha = 0.5 * arctan(2 * u_11/ (u_20 - u_02))
-
-        alpha_d = 0.5 * atan((2*center_moments_d(1,1))/(center_moments_d(2,1) - center_moments_d(1,2)));
-        alpha_d = 0;
-        if (isnan(alpha_d)) alpha_d = 0;
-        alpha = 0.5 * atan((2*center_moments(1,1))/(center_moments(2,1) - center_moments(1,2)));
-        alpha = 0;
-        std::cout<<"alpha= "<<alpha<<std::endl;
-        std::cout<<"alpha_d= "<<alpha_d<<std::endl;
         std::cout<<"area= "<<a_c<<"area_d= "<<a_d<<std::endl;
 
         J_moments(0,3) = y_n;
@@ -395,7 +386,7 @@ class IBVS {        // The class
 
 //        J_moments.print("trasa");
 
-        return std::make_tuple(alpha, alpha_d, J_moments, J_moments_d, a_n, x_n, y_n) ;
+        return std::make_tuple(J_moments, J_moments_d, a_n, x_n, y_n) ;
     }
     void compute_ctrl_law()
     {
@@ -409,8 +400,6 @@ class IBVS {        // The class
                                    {this->fid->x2, this->fid->y2}, {this->fid->x3, this->fid->y3}};
             arma::mat p_desired2 = {{u_0 + w, v_0 - h}, {u_0 + w, v_0 + h}, {u_0 - w, v_0 + h}, {u_0 - w, v_0 - h}};
 
-
-            arma::mat J = arma::zeros<arma::mat>(8,6);
 
 //            p_desired = {{this->u_0 - this->w, this->v_0 - this->h}, {this->u_0 + this->w, this->v_0 - this->h},
 //                         {this->u_0 + this->w, this->v_0 + this->h}, {this->u_0 - this->w, this->v_0 + this->h}} ;
@@ -442,27 +431,30 @@ class IBVS {        // The class
             double x_g, xd_g, x_n;
             double y_g, yd_g, y_n;
             arma::mat centered_m_list, centered_m_list_d;
+
             std::tie(xd_g, yd_g, centered_m_list_d) = get_center_moments(p_desired2);
-            std::cout<<x_g<<y_g;
-            centered_m_list_d.print("k");
+
             std::tie(x_g, y_g, centered_m_list) =get_center_moments(p_current);
-            std::cout<<x_g<<y_g;
-            centered_m_list.print("k");
+
             arma::mat J_moments_d, J_moments, J_combined;
             double alpha, alpha_d, a_n;
-            std::tie(alpha, alpha_d, J_moments, J_moments_d, a_n, x_n, y_n) = compute_jacobian(centered_m_list_d, centered_m_list, x_g, y_g, xd_g, yd_g);
+
+            std::tie(J_moments, J_moments_d, a_n, x_n, y_n) = compute_jacobian(centered_m_list_d, centered_m_list, x_g, y_g, xd_g, yd_g);
 
             alpha = atan2(p_current(2,1)-p_current(0,1), p_current(2,0) - p_current(0,0));
             alpha_d = atan2(p_desired2(2,1)-p_desired2(0,1), p_desired2(2,0) - p_desired2(0,0));
+
 //            double z_d = 0.65;
             double z_d = 1;
             J_combined = 0.5 * (J_moments + J_moments_d);
             J_combined.print("J_comb:");
+
             arma::mat J_pinv = pinv(J_combined);
             arma::vec e_new = {x_n - (z_d *xd_g), y_n - (z_d *yd_g), a_n - z_d, alpha - alpha_d };
+
             std::cout<<"alpha: "<<alpha<<"alphad: "<<alpha_d<<std::endl;
 
-            float lambda = 0.5;
+            float lambda = 0.2;
 //            J_pinv.print("J_pinv");
             arma::mat v_c = - lambda * J_pinv * e_new;
             v_c.print("VC:");
@@ -524,7 +516,7 @@ int main(int argc, char **argv)
         {
             if (!ibvs.takeoff)
             {
-                ibvs.takeoff = ibvs.drone_takeOff(2);
+                ibvs.takeoff = ibvs.drone_takeOff(0, -0.6, 4);
             }
 
             if (ibvs.takeoff)
