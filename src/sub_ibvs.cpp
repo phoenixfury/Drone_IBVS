@@ -82,6 +82,7 @@ class IBVS {        // The class
     image_transport::Publisher image_pub_;
 
     // Need optimization
+    double norm_err_max = 1;
 //    float w = 50*2 * 0.85;
 //    float h = 100 * 0.785;
     float w = 50;
@@ -104,6 +105,7 @@ class IBVS {        // The class
     bool takeoff_time_init = false;
     bool time_init = false;
 
+    bool first_detection = false;
 
     //Loop time variables
     double begin = ros::Time::now().toSec();
@@ -254,7 +256,7 @@ class IBVS {        // The class
 
         if (!takeoff_time_init)
         {
-            for(int i = 100; ros::alpha, alpha_d, ok() && i > 0; --i)
+            for(int i = 100; ros::ok() && i > 0; --i)
             {
                 delta = ros::Time::now().toSec() - begin;
                 if (!takeoff_time_init  || delta > 0.02)
@@ -453,17 +455,24 @@ class IBVS {        // The class
             arma::vec e_new = {x_n - (z_d *xd_g), y_n - (z_d *yd_g), a_n - z_d, alpha - alpha_d };
 
             std::cout<<"alpha: "<<alpha<<"alphad: "<<alpha_d<<std::endl;
+            if (!first_detection)
+            {
+                norm_err_max = arma::norm(e_new, 2);
+                first_detection = true;
+            }
+            double norm_err = arma::norm(e_new, 2);
 
-            float lambda = 0.2;
+            float min_lambda = 0.2;
+            float max_lambda = 1;
+            float lambda = (max_lambda - min_lambda) * (norm_err / norm_err_max) + min_lambda;
 //            J_pinv.print("J_pinv");
             arma::mat v_c = - lambda * J_pinv * e_new;
             v_c.print("VC:");
 
             ROS_INFO("Altitude: [%f] ", z_c);
 
-            double norm = arma::norm(e_new, 2);
 
-            std::cout<<"error norm: "<<norm<<std::endl;
+            std::cout<<"error norm: "<<norm_err<<std::endl;
 
             //TODO Publish rate 50 hz
             m_flag = false;
