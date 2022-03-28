@@ -20,6 +20,7 @@
 #include "fiducial_msgs/FiducialTransformArray.h"
 
 #include <mavros_msgs/CommandBool.h>
+#include <mavros_msgs/CommandLong.h>
 #include <mavros_msgs/SetMode.h>
 #include <mavros_msgs/State.h>
 #include <mavros_msgs/PositionTarget.h>
@@ -39,16 +40,10 @@ static const std::string OPENCV_WINDOW = "Image window";
 class IBVS {        // The class
   private:
     //Aruco marker variables
-    fiducial_msgs::FiducialArray fva; // Array of aruco markers
-    fiducial_msgs::Fiducial fid_val;    //An aruco marker
-    fiducial_msgs::Fiducial * fid = &fid_val;    //An aruco marker
-    fiducial_msgs::FiducialTransformArray fta; //Array of aruco marker transforms
+    fiducial_msgs::Fiducial fid_val[2];    //An aruco marker
+    fiducial_msgs::Fiducial * fid = fid_val;    //An aruco marker
     fiducial_msgs::FiducialTransform ft_val; //An aruco marker transform
     fiducial_msgs::FiducialTransform * ft = &ft_val; //An aruco marker transform
-
-    geometry_msgs::Twist ctrl_input; //A twist message containing the control input
-    geometry_msgs::PoseStamped pose;
-    geometry_msgs::TwistStamped vel_cnt;
 
     ros::NodeHandle n; //ros node handler
 
@@ -70,10 +65,11 @@ class IBVS {        // The class
     //Services
     ros::ServiceClient arming_client;
     ros::ServiceClient set_mode_client;
-
+    ros::ServiceClient force_arming_client;
     //Variables
     mavros_msgs::SetMode offb_set_mode;
     mavros_msgs::CommandBool arm_cmd;
+    mavros_msgs::CommandLong force_arm_cmd;
     mavros_msgs::PositionTarget vel_cnt_full;
 
     // Visualization
@@ -81,13 +77,37 @@ class IBVS {        // The class
     image_transport::Subscriber image_sub_;
     image_transport::Publisher image_pub_;
 
+    // NEED OPTIMIZATION
+    int current_markers = 0;
+    float x_g, y_g, xd_g, yd_g, x_n, y_n, a_d, a_n;
+    arma::mat centered_m_list = arma::zeros<arma::mat>(4,4);
+    arma::mat pre_centered_m = arma::zeros<arma::mat>(4,2);
+
+    arma::mat centered_m_list_d = arma::zeros<arma::mat>(4,4);
+    arma::mat pre_centered_m_d = arma::zeros<arma::mat>(4,2);
+
+    arma::mat J_combined =  -1 * arma::diagmat (arma::ones<arma::vec>(4));
+    arma::mat J_moments =  -1 * arma::diagmat (arma::ones<arma::vec>(4));
+    arma::mat J_moments_d =  -1 * arma::diagmat (arma::ones<arma::vec>(4));
+    arma::mat J_pinv;
+
+    arma::mat n_moments_d = arma::zeros<arma::mat>(4,4);
+    arma::mat n_moments = arma::zeros<arma::mat>(4,4);
+
+    arma::vec err;
     // Need optimization
     double norm_err_max = 1;
-//    float w = 50*2 * 0.85;
-//    float h = 100 * 0.785;
-    float w = 50;
-    float h = 100/2;
+    float w = 75;
+    float h = 75;
+    float gain;
+//    float w = 50;
+//    float h = 100/2;
+    bool marker1 = true;
+    arma::mat v={0, 0, 0, 0};
+    arma::mat v2={0, 0, 0, 0};
     arma::mat p_desired = {{480/w, 128/w}, {480/w, 384/w}, {160/w, 384/w}, {160/w, 128/w}};
+//    arma::mat p_desired = {{480/w, 128/w}, {480/w, 384/w}, {160/w, 384/w}, {160/w, 128/w}};
+    arma::mat p_desired_transformed = {{480/w, 128/w}, {480/w, 384/w}, {160/w, 384/w}, {160/w, 128/w}};
 
     float f_x;
 
@@ -130,31 +150,34 @@ class IBVS {        // The class
     {
         n = *nh;
         // Jackal velocity controller
-        pub = nh->advertise<geometry_msgs::Twist>("jackal_velocity_controller/cmd_vel", 1000);
+//        pub = nh->advertise<geometry_msgs::Twist>("jackal_velocity_controller/cmd_vel", 1000);
 
         // Aruco marker detections
-        vertices_sub = nh->subscribe("fiducial_vertices", 1000, &IBVS::markerCallback, this);
-        transforms_sub = nh->subscribe("fiducial_transforms", 1000, &IBVS::transformCallback, this);
+        vertices_sub = nh->subscribe("fiducial_vertices", 3, &IBVS::markerCallback, this);
+        transforms_sub = nh->subscribe("fiducial_transforms", 3, &IBVS::transformCallback, this);
 
         //Camera Info
         camera_info_sub = nh->subscribe("/camera/rgb/camera_info", 1, &IBVS::c_infoCallback, this);
 
         //Drone publishers and subscribers
-        drone_pos_pub =nh->advertise<geometry_msgs::PoseStamped>("mavros/setpoint_position/local", 10);
-        drone_vel_pub =nh->advertise<mavros_msgs::PositionTarget>("mavros/setpoint_raw/local", 10);
-        drone_state_sub = nh->subscribe<mavros_msgs::State>("mavros/state", 10, &IBVS::drone_state_callback, this);
-        drone_pose_sub =nh->subscribe<geometry_msgs::PoseStamped>("mavros/local_position/pose", 100, &IBVS::drone_pose_callback, this);
+        drone_pos_pub =nh->advertise<geometry_msgs::PoseStamped>("mavros/setpoint_position/local", 5);
+        drone_vel_pub =nh->advertise<mavros_msgs::PositionTarget>("mavros/setpoint_raw/local", 5);
+        drone_state_sub = nh->subscribe<mavros_msgs::State>("mavros/state", 5, &IBVS::drone_state_callback, this);
+        drone_pose_sub =nh->subscribe<geometry_msgs::PoseStamped>("mavros/local_position/pose", 5, &IBVS::drone_pose_callback, this);
 
         //Drone services
         arming_client = nh->serviceClient<mavros_msgs::CommandBool>("mavros/cmd/arming");
+        force_arming_client = nh->serviceClient<mavros_msgs::CommandLong>("mavros/cmd/command");
         set_mode_client = nh->serviceClient<mavros_msgs::SetMode>("mavros/set_mode");
 
         // Visualization advertiser and subscriber
-        image_sub_ = it_.subscribe("/fiducial_images", 1, &IBVS::imageCb, this);
-        image_pub_ = it_.advertise("/sub_ibvs/output_video", 1);
+        image_sub_ = it_.subscribe("/fiducial_images", 2, &IBVS::imageCb, this);
+        image_pub_ = it_.advertise("/sub_ibvs/output_video", 2);
 
         cv::namedWindow(OPENCV_WINDOW);
     }
+
+
     void c_infoCallback(const sensor_msgs::CameraInfoConstPtr& cam_info)
     {
         if (k_flag == false)
@@ -170,9 +193,16 @@ class IBVS {        // The class
             this->u_0 = K(2);
             this->v_0 = K(5);
 
+            this->p_desired = {{this->u_0 - this->w, this->v_0 + this->h}, {this->u_0 - this->w, this->v_0 - this->h},
+                               {this->u_0 + this->w, this->v_0 - this->h}, {this->u_0 + this->w, this->v_0 + this->h}} ;
+
+            this->init_desired_variables(this->p_desired, 0);
+
             k_flag = true;
         }
     }
+
+
     void imageCb(const sensor_msgs::ImageConstPtr& msg)//sensor_msgs::CompressedImage::ConstPtr & msg
 
       {
@@ -217,18 +247,17 @@ class IBVS {        // The class
 
     void markerCallback(const fiducial_msgs::FiducialArray fva)
     {
+        this->current_markers = fva.fiducials.size();
         for (size_t i=0; i<fva.fiducials.size(); i++) {
-
-            this->fid->fiducial_id = fva.fiducials[i].fiducial_id;
-
-            this->fid->x0 = fva.fiducials[i].x0;
-            this->fid->y0 = fva.fiducials[i].y0;
-            this->fid->x1 = fva.fiducials[i].x1;
-            this->fid->y1 = fva.fiducials[i].y1;
-            this->fid->x2 = fva.fiducials[i].x2;
-            this->fid->y2 = fva.fiducials[i].y2;
-            this->fid->x3 = fva.fiducials[i].x3;
-            this->fid->y3 = fva.fiducials[i].y3;
+            this->fid[i].fiducial_id = fva.fiducials[i].fiducial_id;
+            this->fid[i].x0 = fva.fiducials[i].x0;
+            this->fid[i].y0 = fva.fiducials[i].y0;
+            this->fid[i].x1 = fva.fiducials[i].x1;
+            this->fid[i].y1 = fva.fiducials[i].y1;
+            this->fid[i].x2 = fva.fiducials[i].x2;
+            this->fid[i].y2 = fva.fiducials[i].y2;
+            this->fid[i].x3 = fva.fiducials[i].x3;
+            this->fid[i].y3 = fva.fiducials[i].y3;
         }
         m_flag = true;
     }
@@ -305,7 +334,35 @@ class IBVS {        // The class
 
     }
 
-    std::tuple<double, double, arma::mat>  get_center_moments(arma::mat points)
+
+    void init_desired_variables(arma::mat points, float z)
+    {
+        // Initialize the constant matrices and variables
+        this->p_desired = points;
+
+        int m_00 = 4;
+
+        for (size_t i=0; i<4; i++)
+
+        {
+            float x_d = (this->p_desired(i, 0)- this->u_0)/this->f_x;
+            float y_d = (this->p_desired(i, 1)- this->v_0)/this->f_y;
+
+            this->p_desired_transformed(i,0) = x_d;
+            this->p_desired_transformed(i,1) = y_d;
+        }
+        get_center_moments(this->p_desired_transformed);
+        this->xd_g = this->x_g;
+        this->yd_g = this->y_g;
+        this->centered_m_list_d = this->centered_m_list;
+
+        this->n_moments_d = this->centered_m_list_d / m_00;
+
+        this->a_d = this->centered_m_list_d(2,0) + this->centered_m_list_d(0, 2);
+
+    }
+
+    void get_center_moments(arma::mat points)
     {
         double sum;
         int m_00 = 4;
@@ -315,14 +372,11 @@ class IBVS {        // The class
         float m_10 = points(0, 0) + points(1, 0) + points(2, 0)+ points(3, 0);
 
         // x_g = m_10/m_00  y_g = m_01/m_00;
-        double x_g = m_10/m_00;
-        double y_g = m_01/m_00;
+        this->x_g = m_10/m_00;
+        this->y_g = m_01/m_00;
 
-        arma::mat centered_m_list = arma::zeros<arma::mat>(4,4);
-        arma::mat pre_centered_m = arma::zeros<arma::mat>(4,2);
-
-        pre_centered_m(arma::span(0,3), 0) = points(arma::span(0,3), 0) - x_g;
-        pre_centered_m(arma::span(0,3), 1) = points(arma::span(0,3), 1) - y_g;
+        this->pre_centered_m(arma::span(0,3), 0) = points(arma::span(0,3), 0) - this->x_g;
+        this->pre_centered_m(arma::span(0,3), 1) = points(arma::span(0,3), 1) - this->y_g;
 
         for(size_t i=0; i<4; i++)
         {
@@ -331,82 +385,51 @@ class IBVS {        // The class
                 sum = 0;
                 for(size_t k=0; k<4; k++)
                 {
-                    sum += (pow(pre_centered_m(k, 0), i) *  pow(pre_centered_m(k, 1), j));
+                    sum += (pow(this->pre_centered_m(k, 0), i) *  pow(this->pre_centered_m(k, 1), j));
                 }
-                centered_m_list(i, j) = sum;
+                this->centered_m_list(i, j) = sum;
             }
         }
-        /*
-        pre_centered_m.print("x-xg");
-        centered_m_list.print("centered moments: ");
-        std::cout<<"x_g="<<x_g<<" y_g="<<y_g<<" m_01="<< m_01<<" m_10="<<m_10<<std::endl;*/
-        return std::make_tuple(x_g, y_g, centered_m_list) ;
     }
 
 
-    std::tuple<arma::mat, arma::mat,
-                double, double, double>compute_jacobian(arma::mat center_moments_d
-                          ,arma::mat center_moments, double x_g, double y_g, double xd_g, double yd_g)
+    float compute_jacobian(float z_d)
     {
-        int m_00;
-        float z_d, a_d, a_c, a_n, x_n, y_n;
+        int m_00= 4;
+        float a_c;
 
-
-        arma::mat J_moments =  -1 * arma::diagmat (arma::ones<arma::vec>(4));
-        arma::mat J_moments_d =  -1 * arma::diagmat (arma::ones<arma::vec>(4));
-
-        arma::mat n_moments_d = arma::zeros<arma::mat>(4,4);
-        arma::mat n_moments = arma::zeros<arma::mat>(4,4);
-
-        m_00 = 4;
-        n_moments_d = center_moments_d / m_00;
-        n_moments = center_moments / m_00;
+        this->n_moments = this->centered_m_list / m_00;
 
         // a = u_20 + u_02
-        a_d = center_moments_d(2,0) + center_moments_d(0, 2);
-        a_c = center_moments(2,0) + center_moments(0, 2);
 
-//        z_d = 0.65;
-        z_d = 1;
+        a_c = this->centered_m_list(2,0) + this->centered_m_list(0, 2);
+
         // a_n = z_d * sqrt( a_d / a_c)
-        a_n = z_d * sqrt( a_d / a_c);
+        this->a_n = z_d * sqrt( this->a_d / a_c);
 
         // x_normalized = x_n = a_n * x_g   y_n = a_n * y_g
-        x_n = a_n * x_g;
-        y_n = a_n * y_g;
+        this->x_n = this->a_n * this->x_g;
+        this->y_n = this->a_n * this->y_g;
 
-        float xd_n = a_n * xd_g;
-        float yd_n = a_n * yd_g;
+        std::cout<<"area= "<<a_c<<"area_d= "<<this->a_d<<std::endl;
 
-        std::cout<<"area= "<<a_c<<"area_d= "<<a_d<<std::endl;
+        this->J_moments(0,3) = y_n;
+        this->J_moments(1,3) = -x_n;
 
-        J_moments(0,3) = y_n;
-        J_moments(1,3) = -x_n;
-
-        J_moments_d(0,3) = yd_n;
-        J_moments_d(1,3) = -xd_n;
-
-//        J_moments.print("trasa");
-
-        return std::make_tuple(J_moments, J_moments_d, a_n, x_n, y_n) ;
+        this->J_moments_d(0,3) = this->a_n * this->xd_g;
+        this->J_moments_d(1,3) = - (this->a_n * this->xd_g);
+        return a_n;
     }
-    void compute_ctrl_law()
+
+    std::tuple<double, arma::mat> compute_ctrl_law(fiducial_msgs::Fiducial current_fid, float z_dd)
     {
-        geometry_msgs::Twist msg;
-
-        if(c_flag && k_flag && m_flag)
-        {
-
 //            arma::mat p_desired = {{365.7, 156.7}, {365, 317.5}, {205.6, 317}, {205.5, 158.3}};
-            arma::mat p_current = {{this->fid->x0, this->fid->y0}, {this->fid->x1, this->fid->y1},
-                                   {this->fid->x2, this->fid->y2}, {this->fid->x3, this->fid->y3}};
-            arma::mat p_desired2 = {{u_0 + w, v_0 - h}, {u_0 + w, v_0 + h}, {u_0 - w, v_0 + h}, {u_0 - w, v_0 - h}};
-
+            arma::mat p_current = {{current_fid.x0, current_fid.y0}, {current_fid.x1, current_fid.y1},
+                                   {current_fid.x2, current_fid.y2}, {current_fid.x3, current_fid.y3}};
 
 //            p_desired = {{this->u_0 - this->w, this->v_0 - this->h}, {this->u_0 + this->w, this->v_0 - this->h},
 //                         {this->u_0 + this->w, this->v_0 + this->h}, {this->u_0 - this->w, this->v_0 + this->h}} ;
-            p_desired = {{this->u_0 - this->w, this->v_0 + this->h}, {this->u_0 - this->w, this->v_0 - this->h},
-                         {this->u_0 + this->w, this->v_0 - this->h}, {this->u_0 + this->w, this->v_0 + this->h}} ;
+
 
             float z_c = this->ft->transform.translation.z;
 
@@ -418,56 +441,52 @@ class IBVS {        // The class
             {
                 float x_c = (p_current(i, 0)- u_0)/f_x;
                 float y_c = (p_current(i, 1)- v_0)/f_y;
-                float x_d = (p_desired(i, 0)- u_0)/f_x;
-                float y_d = (p_desired(i, 1)- v_0)/f_y;
-
-                p_desired2(i,0) = x_d;
-                p_desired2(i,1) = y_d;
 
                 p_current(i,0) = x_c;
                 p_current(i,1) = y_c;
-//                std::cout<<"x_c"<<x_c<<y_c<<x_d<<y_d<<" "<<u_0<<" "<<v_0<<" "<<f_x<<std::endl;
             }
 
 
-            double x_g, xd_g, x_n;
-            double y_g, yd_g, y_n;
-            arma::mat centered_m_list, centered_m_list_d;
+            get_center_moments(p_current);
 
-            std::tie(xd_g, yd_g, centered_m_list_d) = get_center_moments(p_desired2);
+            float a_n;
 
-            std::tie(x_g, y_g, centered_m_list) =get_center_moments(p_current);
+            a_n = compute_jacobian(z_dd);
 
-            arma::mat J_moments_d, J_moments, J_combined;
-            double alpha, alpha_d, a_n;
+            float alpha = atan2(p_current(2,1)-p_current(0,1), p_current(2,0) - p_current(0,0));
+            float alpha_d = atan2(this->p_desired_transformed(2,1)-this->p_desired_transformed(0,1), this->p_desired_transformed(2,0) - this->p_desired_transformed(0,0));
 
-            std::tie(J_moments, J_moments_d, a_n, x_n, y_n) = compute_jacobian(centered_m_list_d, centered_m_list, x_g, y_g, xd_g, yd_g);
+            float z_d = z_dd;
+//            double z_d = 1;
+            this->J_combined = 0.5 * (this->J_moments + this->J_moments_d);
+            this->J_combined.print("J_comb:");
 
-            alpha = atan2(p_current(2,1)-p_current(0,1), p_current(2,0) - p_current(0,0));
-            alpha_d = atan2(p_desired2(2,1)-p_desired2(0,1), p_desired2(2,0) - p_desired2(0,0));
-
-//            double z_d = 0.65;
-            double z_d = 1;
-            J_combined = 0.5 * (J_moments + J_moments_d);
-            J_combined.print("J_comb:");
-
-            arma::mat J_pinv = pinv(J_combined);
-            arma::vec e_new = {x_n - (z_d *xd_g), y_n - (z_d *yd_g), a_n - z_d, alpha - alpha_d };
+            this->J_pinv = pinv(this->J_combined);
+            this->err = {this->x_n - (z_d *this->xd_g), this->y_n - (z_d *this->yd_g), a_n - z_d, alpha - alpha_d };
 
             std::cout<<"alpha: "<<alpha<<"alphad: "<<alpha_d<<std::endl;
             if (!first_detection)
             {
-                norm_err_max = arma::norm(e_new, 2);
+                norm_err_max = arma::norm(this->err, 2);
                 first_detection = true;
             }
-            double norm_err = arma::norm(e_new, 2);
+            float norm_err = arma::norm(this->err, 2);
 
-            float min_lambda = 0.2;
-            float max_lambda = 1;
+            float min_lambda =1.5;
+            float max_lambda = 0.5;
             float lambda = (max_lambda - min_lambda) * (norm_err / norm_err_max) + min_lambda;
+
 //            J_pinv.print("J_pinv");
-            arma::mat v_c = - lambda * J_pinv * e_new;
-            v_c.print("VC:");
+            if(this->marker1)
+            {
+                this->v = - lambda* this->J_pinv * this->err;
+
+            }
+            else
+            {
+                this->v = -lambda* this->J_pinv * this->err;
+            }
+            this->v.print("VC:");
 
             ROS_INFO("Altitude: [%f] ", z_c);
 
@@ -478,39 +497,79 @@ class IBVS {        // The class
             m_flag = false;
             c_flag = false;
 
-            delta = ros::Time::now().toSec() - begin;
-            if (!time_init || delta > 0.02)
-            {
-                ROS_INFO("time: [%f] ", delta);
-                std::cout<<"Now velocity control"<<std::endl;
-                begin = ros::Time::now().toSec();
-                time_init = true;
-//                pub.publish(msg);
-                vel_cnt_full.coordinate_frame = 8;
-                vel_cnt_full.type_mask = 1991; //Ignore everything except the linear x,y,z velocities and angular yaw
-                vel_cnt_full.velocity.x =  - v_c(1);
-                vel_cnt_full.velocity.y = - v_c(0);
-                vel_cnt_full.velocity.z = - v_c(2);
-                vel_cnt_full.yaw_rate =  -v_c(3);
+            return std::make_tuple(norm_err, this->v);
 
-                vel_cnt_full.header.stamp.sec = ros::Time::now().toSec();
-                vel_cnt_full.header.stamp.nsec = ros::Time::now().toNSec();
-                vel_cnt_full.header.frame_id = "base_link";
-                drone_vel_pub.publish(vel_cnt_full);
-//                geometry_msgs::PoseStamped pose;
-
-//                pose.pose.position.x = 0;
-//                pose.pose.position.y = 0;
-//                pose.pose.position.z = 1.6;
-
-//                drone_pos_pub.publish(pose);
-
-            }
-            
-        }
     }
 
-};
+
+    void send_ctrl_signal(arma::mat v_c, float er)
+    {
+
+            vel_cnt_full.coordinate_frame = 8;
+            vel_cnt_full.type_mask = 1991; //Ignore everything except the linear x,y,z velocities and angular yaw
+            vel_cnt_full.velocity.x =  - v_c(1);
+            vel_cnt_full.velocity.y = - v_c(0);
+            vel_cnt_full.velocity.z = - v_c(2);
+            vel_cnt_full.yaw_rate =  -v_c(3);
+
+            vel_cnt_full.header.stamp.sec = ros::Time::now().toSec();
+            vel_cnt_full.header.stamp.nsec = ros::Time::now().toNSec();
+            vel_cnt_full.header.frame_id = "base_link";
+            drone_vel_pub.publish(vel_cnt_full);
+    }
+
+
+    void marker_selection()
+    {
+        if (c_flag && k_flag && m_flag) {
+            begin = ros::Time::now().toSec();
+            float threshold = 0.06;
+            float z = 0.6;
+            float z_2 = 0.2;
+
+
+            float er;
+            for (size_t i = 0; i < this->current_markers; i++) {
+                if (this->marker1 && this->fid[i].fiducial_id == 0) {
+                    std::tie(er, this->v) = compute_ctrl_law(this->fid[i], z);
+                    if (er < threshold) { this->marker1 = false;
+                        this->w = 40;
+                        this->h = 40;
+                        this->p_desired = {{this->u_0 - this->w, this->v_0 + this->h}, {this->u_0 - this->w, this->v_0 - this->h},
+                                           {this->u_0 + this->w, this->v_0 - this->h}, {this->u_0 + this->w, this->v_0 + this->h}} ;
+                        init_desired_variables( this->p_desired,z_2);}
+                }
+
+                if (!this->marker1 && this->fid[i].fiducial_id == 7)
+                {
+                    std::tie(er, this->v) = compute_ctrl_law(this->fid[i], z_2);
+                    arm_cmd.request.value = false;
+                    this->force_arm_cmd.request.command = 400;
+                    this->force_arm_cmd.request.confirmation = 0;
+                    this->force_arm_cmd.request.param1 = 0;
+                    this->force_arm_cmd.request.param1 = 21196;
+                    this->force_arm_cmd.request.broadcast = false;
+
+                    if( current_state.armed && er < 0.015)
+                        {
+                            arming_client.call(arm_cmd);
+                            if( this->force_arming_client.call(force_arm_cmd))
+                            {
+                                ROS_INFO("Vehicle disarmed");
+                                ros::shutdown();
+                            }
+                        }
+                }
+
+
+
+            }
+            send_ctrl_signal(this->v, er);
+            std::cout<<"time: "<<ros::Time::now().toSec()- begin<<std::endl;
+
+        }
+    }
+    };
 
 
 int main(int argc, char **argv)
@@ -525,12 +584,12 @@ int main(int argc, char **argv)
         {
             if (!ibvs.takeoff)
             {
-                ibvs.takeoff = ibvs.drone_takeOff(0, -0.6, 4);
+                ibvs.takeoff = ibvs.drone_takeOff(0.175, 0.175, 1.25);
             }
 
             if (ibvs.takeoff)
             {
-                ibvs.compute_ctrl_law();
+                ibvs.marker_selection();
             }
 
             ros::spinOnce();
