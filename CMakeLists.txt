@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 2.8.3)
 project(drone_ibvs)
 add_definitions(-std=c++11)
 ## Find catkin and any catkin packages
-find_package(catkin REQUIRED COMPONENTS roscpp rospy sensor_msgs std_msgs genmsg geometry_msgs fiducial_msgs mavros_msgs cv_bridge image_transport)
+find_package(catkin REQUIRED COMPONENTS roscpp rospy sensor_msgs std_msgs genmsg geometry_msgs fiducial_msgs mavros_msgs cv_bridge image_transport ibvs_msgs)
 
 find_package(Armadillo REQUIRED)
 include_directories(include ${ARMADILLO_INCLUDE_DIRS})

@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/drone_ibvs.iml" filepath="$PROJECT_DIR$/.idea/drone_ibvs.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/drone_ibvs2.iml" filepath="$PROJECT_DIR$/.idea/drone_ibvs2.iml" />
     </modules>
   </component>
 </project>

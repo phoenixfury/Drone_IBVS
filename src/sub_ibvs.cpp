@@ -34,6 +34,9 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
+#include <ibvs_msgs/Signal.h>
+#include <ibvs_msgs/SignalArray.h>
+
 static const std::string OPENCV_WINDOW = "Image window";
 
 
@@ -51,7 +54,10 @@ class IBVS {        // The class
     ros::Subscriber vertices_sub;
     ros::Subscriber transforms_sub;
     ros::Subscriber camera_info_sub;
+    ros::Publisher analysis_pub;
 
+    ibvs_msgs::Signal cur_sig;
+    ibvs_msgs::SignalArray signal_arr;
     // The Drone part
     // Messages
     mavros_msgs::State current_state;
@@ -152,6 +158,8 @@ class IBVS {        // The class
         // Jackal velocity controller
 //        pub = nh->advertise<geometry_msgs::Twist>("jackal_velocity_controller/cmd_vel", 1000);
 
+        //Analaysis publisher
+        analysis_pub = nh->advertise<ibvs_msgs::SignalArray>("/sub_ibvs/analysis", 10);
         // Aruco marker detections
         vertices_sub = nh->subscribe("fiducial_vertices", 3, &IBVS::markerCallback, this);
         transforms_sub = nh->subscribe("fiducial_transforms", 3, &IBVS::transformCallback, this);
@@ -290,9 +298,8 @@ class IBVS {        // The class
                 delta = ros::Time::now().toSec() - begin;
                 if (!takeoff_time_init  || delta > 0.02)
                 {
-                    ROS_INFO("time: [%f] ", delta);
                     begin = ros::Time::now().toSec();
-                    std::cout<<"now publishing"<<std::endl;
+//                    std::cout<<"now publishing"<<std::endl;
                     drone_pos_pub.publish(pose);
                 }
             }
@@ -411,7 +418,7 @@ class IBVS {        // The class
         this->x_n = this->a_n * this->x_g;
         this->y_n = this->a_n * this->y_g;
 
-        std::cout<<"area= "<<a_c<<"area_d= "<<this->a_d<<std::endl;
+//        std::cout<<"area= "<<a_c<<"area_d= "<<this->a_d<<std::endl;
 
         this->J_moments(0,3) = y_n;
         this->J_moments(1,3) = -x_n;
@@ -431,10 +438,7 @@ class IBVS {        // The class
 //                         {this->u_0 + this->w, this->v_0 + this->h}, {this->u_0 - this->w, this->v_0 + this->h}} ;
 
 
-            float z_c = this->ft->transform.translation.z;
-
-            if (z_c == 0) z_c =1;
-
+//            float z_c = this->ft->transform.translation.z;
 
             for (size_t i=0; i<4; i++)
 
@@ -457,14 +461,21 @@ class IBVS {        // The class
             float alpha_d = atan2(this->p_desired_transformed(2,1)-this->p_desired_transformed(0,1), this->p_desired_transformed(2,0) - this->p_desired_transformed(0,0));
 
             float z_d = z_dd;
-//            double z_d = 1;
+
             this->J_combined = 0.5 * (this->J_moments + this->J_moments_d);
-            this->J_combined.print("J_comb:");
+//            this->J_combined.print("J_comb:");
 
             this->J_pinv = pinv(this->J_combined);
             this->err = {this->x_n - (z_d *this->xd_g), this->y_n - (z_d *this->yd_g), a_n - z_d, alpha - alpha_d };
 
-            std::cout<<"alpha: "<<alpha<<"alphad: "<<alpha_d<<std::endl;
+            this->cur_sig.v1 = this->err(0);
+            this->cur_sig.v2 = this->err(1);
+            this->cur_sig.v3 = this->err(2);
+            this->cur_sig.v4 = this->err(3);
+
+            this->signal_arr.err_signal = this->cur_sig;
+
+//        std::cout<<"alpha: "<<alpha<<"alphad: "<<alpha_d<<std::endl;
             if (!first_detection)
             {
                 norm_err_max = arma::norm(this->err, 2);
@@ -472,7 +483,7 @@ class IBVS {        // The class
             }
             float norm_err = arma::norm(this->err, 2);
 
-            float min_lambda =1.5;
+            float min_lambda =1.25;
             float max_lambda = 0.5;
             float lambda = (max_lambda - min_lambda) * (norm_err / norm_err_max) + min_lambda;
 
@@ -486,12 +497,16 @@ class IBVS {        // The class
             {
                 this->v = -lambda* this->J_pinv * this->err;
             }
-            this->v.print("VC:");
+//            ROS_INFO("Altitude: [%f] ", z_c);
+            this->cur_sig.v1 = this->v(0);
+            this->cur_sig.v2 = this->v(1);
+            this->cur_sig.v3 = this->v(2);
+            this->cur_sig.v4 = this->v(3);
 
-            ROS_INFO("Altitude: [%f] ", z_c);
+            this->signal_arr.ctrl_signal = this->cur_sig;
+            this->signal_arr.norm_err = norm_err;
 
-
-            std::cout<<"error norm: "<<norm_err<<std::endl;
+            analysis_pub.publish(signal_arr);
 
             //TODO Publish rate 50 hz
             m_flag = false;
@@ -525,7 +540,7 @@ class IBVS {        // The class
             begin = ros::Time::now().toSec();
             float threshold = 0.06;
             float z = 0.6;
-            float z_2 = 0.2;
+            float z_2 = 0.15;
 
 
             float er;
@@ -533,8 +548,8 @@ class IBVS {        // The class
                 if (this->marker1 && this->fid[i].fiducial_id == 0) {
                     std::tie(er, this->v) = compute_ctrl_law(this->fid[i], z);
                     if (er < threshold) { this->marker1 = false;
-                        this->w = 40;
-                        this->h = 40;
+                        this->w = 50;
+                        this->h = 50;
                         this->p_desired = {{this->u_0 - this->w, this->v_0 + this->h}, {this->u_0 - this->w, this->v_0 - this->h},
                                            {this->u_0 + this->w, this->v_0 - this->h}, {this->u_0 + this->w, this->v_0 + this->h}} ;
                         init_desired_variables( this->p_desired,z_2);}
@@ -543,16 +558,15 @@ class IBVS {        // The class
                 if (!this->marker1 && this->fid[i].fiducial_id == 7)
                 {
                     std::tie(er, this->v) = compute_ctrl_law(this->fid[i], z_2);
-                    arm_cmd.request.value = false;
-                    this->force_arm_cmd.request.command = 400;
-                    this->force_arm_cmd.request.confirmation = 0;
-                    this->force_arm_cmd.request.param1 = 0;
-                    this->force_arm_cmd.request.param1 = 21196;
-                    this->force_arm_cmd.request.broadcast = false;
 
                     if( current_state.armed && er < 0.015)
                         {
-                            arming_client.call(arm_cmd);
+                            this->force_arm_cmd.request.command = 400;
+                            this->force_arm_cmd.request.confirmation = 0;
+                            this->force_arm_cmd.request.param1 = 0;
+                            this->force_arm_cmd.request.param1 = 21196;
+                            this->force_arm_cmd.request.broadcast = false;
+
                             if( this->force_arming_client.call(force_arm_cmd))
                             {
                                 ROS_INFO("Vehicle disarmed");
@@ -565,7 +579,7 @@ class IBVS {        // The class
 
             }
             send_ctrl_signal(this->v, er);
-            std::cout<<"time: "<<ros::Time::now().toSec()- begin<<std::endl;
+//            std::cout<<"time: "<<ros::Time::now().toSec()- begin<<std::endl;
 
         }
     }
@@ -584,7 +598,7 @@ int main(int argc, char **argv)
         {
             if (!ibvs.takeoff)
             {
-                ibvs.takeoff = ibvs.drone_takeOff(0.175, 0.175, 1.25);
+                ibvs.takeoff = ibvs.drone_takeOff(0.2, 0.2, 2.0);
             }
 
             if (ibvs.takeoff)
